@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import json
 
 class MazeVisualizer:
     def __init__(self, map_size_pixels=21, map_size_meters=21, title="Maze Visualizer"):
@@ -15,6 +16,17 @@ class MazeVisualizer:
         self._path = None
         self._pgm_img = None
         self._return_traj = None
+
+    def load_line_segments_from_json(json_file_path):
+        try:
+            with open(json_file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            segments = data.get('segments', data.get('line_segments', []))
+            start_point = data.get('start_point', [0, 0])
+            return segments, start_point
+        except Exception as e:
+            print(f"❌ Failed to load JSON: {e}")
+            return [], [0, 0] 
 
     def load_line_segments(self, segments, start_point=None, end_point=None):
         self._maze_segments = segments
