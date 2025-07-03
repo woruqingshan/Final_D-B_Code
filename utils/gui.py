@@ -21,26 +21,36 @@ class MazeVisualizer:
         self._slam_simulator = None
         self._slam_scanned_mask = np.zeros((self.map_size_pixels, self.map_size_pixels), dtype=bool)
         self._slam_pose = None
+        # 新增：存储检测到的终点，用于可视化
+        self._detected_ends = set()
 
     def load_line_segments(self, segments, start_point=None, end_point=None):
         self._maze_segments = segments
         self._start_point = start_point
         self._end_point = end_point
 
-    def set_trajectory(self, trajectory):
-        self._trajectory = trajectory
+    def set_trajectory(self, points):
+        """设置探索轨迹，points为(x, y)列表，空列表则清空"""
+        self.trajectory = points if points else []
+        self.show()
 
-    def set_scan_points(self, scan_points):
-        self._scan_points = scan_points
+    def set_scan_points(self, points):
+        """设置激光点，points为(x, y)列表，空列表则清空"""
+        self.scan_points = points if points else []
+        self.show()
 
-    def set_path(self, path):
-        self._path = path
+    def set_path(self, points):
+        """设置最优路径，points为像素坐标(x, y)列表"""
+        self.path = points if points else []
+        self.show()
 
     def set_pgm_img(self, pgm_img):
         self._pgm_img = pgm_img
 
-    def set_return_trajectory(self, return_traj):
-        self._return_traj = return_traj
+    def set_return_trajectory(self, points):
+        """设置回程轨迹，points为(x, y)列表，红色显示"""
+        self.return_trajectory = points if points else []
+        self.show()
 
     def set_slam_simulator(self, slam_simulator):
         self._slam_simulator = slam_simulator
@@ -60,6 +70,11 @@ class MazeVisualizer:
                 y_end = y0 + r_m * np.sin(a + theta)
                 self._mark_laser_path(x0, y0, x_end, y_end)
 
+    # 新增：设置检测到的终点
+    def set_detected_ends(self, detected_ends):
+        """设置检测到的终点集合，用于可视化"""
+        self._detected_ends = detected_ends
+
     def _mark_laser_path(self, x0, y0, x1, y1):
         # 将激光束路径上的像素点在scanned_mask中置True
         num = int(max(abs(x1-x0), abs(y1-y0)) * self.map_size_pixels / self.map_size_meters * 2)
@@ -73,8 +88,8 @@ class MazeVisualizer:
             if 0 <= ix < self.map_size_pixels and 0 <= iy < self.map_size_pixels:
                 self._slam_scanned_mask[iy, ix] = True
 
-    def show(self):
-        # 左侧：迷宫线段、起点、终点、轨迹、扫描点、路径
+    def show_left(self):
+        """只刷新左侧地图和轨迹，不刷新右侧SLAM画面"""
         self.ax_left.clear()
         for seg in self._maze_segments:
             x0, y0 = seg['start']
@@ -84,55 +99,62 @@ class MazeVisualizer:
             self.ax_left.plot(self._start_point[0], self._start_point[1], 'o', color='green', markersize=12, label='Start')
         if self._end_point is not None:
             self.ax_left.plot(self._end_point[0], self._end_point[1], 'o', color='red', markersize=12, label='End')
-        if self._trajectory is not None and len(self._trajectory) > 0:
-            xs, ys = zip(*self._trajectory)
+        if hasattr(self, 'trajectory') and self.trajectory and len(self.trajectory) > 0:
+            xs, ys = zip(*self.trajectory)
             self.ax_left.plot(xs, ys, color='orange', linewidth=2, alpha=0.7, label='Trajectory')
             self.ax_left.scatter([xs[-1]], [ys[-1]], 
                         s=300, c='magenta', edgecolors='black', linewidths=2, zorder=10, label='Flood Cursor')
-        if self._scan_points is not None and len(self._scan_points) > 0:
-            xs, ys = zip(*self._scan_points)
+        if hasattr(self, 'scan_points') and self.scan_points and len(self.scan_points) > 0:
+            xs, ys = zip(*self.scan_points)
             self.ax_left.scatter(xs, ys, color='cyan', s=30, label='Scan Points', alpha=0.7)
-        if self._path is not None and len(self._path) > 0:
-            xs, ys = zip(*[(x, y) for y, x in self._path])
+        if hasattr(self, 'path') and self.path and len(self.path) > 0:
+            xs, ys = zip(*self.path)
             self.ax_left.plot(xs, ys, color='blue', linewidth=2, label='A* Path')
-        if hasattr(self, '_return_traj') and self._return_traj and len(self._return_traj) > 1:
-            xs, ys = zip(*self._return_traj)
+        if hasattr(self, 'return_trajectory') and self.return_trajectory and len(self.return_trajectory) > 1:
+            xs, ys = zip(*self.return_trajectory)
             self.ax_left.plot(xs, ys, color='red', linewidth=2, label='Return Trajectory')
-            # 左侧光标：填充色黑色，边缘黑色，更大尺寸更醒目
             self.ax_left.scatter([xs[-1]], [ys[-1]], 
                     s=300, c='magenta', edgecolors='black', linewidths=2, zorder=10, label='Left Cursor')
+        
+        # 新增：绘制检测到的终点（五角星）
+        if self._detected_ends:
+            end_x = [end[0] for end in self._detected_ends]
+            end_y = [end[1] for end in self._detected_ends]
+            self.ax_left.scatter(end_x, end_y, color='magenta', s=200, marker='*', 
+                               edgecolors='black', linewidths=2, zorder=15, label='Detected Ends')
         self.ax_left.set_title("Maze & Path")
         self.ax_left.set_xlabel('X')
         self.ax_left.set_ylabel('Y')
         self.ax_left.set_aspect('equal')
         self.ax_left.legend(loc='upper right')
         self.ax_left.grid(True)
-        # 右侧：SLAM激光探索视图
+        plt.draw()
+        plt.pause(self.refresh_rate)
+
+    def show_both(self):
+        """刷新左侧地图和右侧SLAM画面"""
+        self.show_left()
+        # 右侧SLAM激光探索视图
         self.ax_right.clear()
         self.ax_right.set_facecolor('0.5')
-        # 右侧底图：未探索（黑），障碍（灰，永久），已探索（白）
-        base_img = np.zeros((self.map_size_pixels, self.map_size_pixels), dtype=float)  # 黑色
+        base_img = np.zeros((self.map_size_pixels, self.map_size_pixels), dtype=float)
         if self._slam_simulator is not None and hasattr(self._slam_simulator, 'occupancy_grid') and self._slam_simulator.occupancy_grid is not None:
             occ = self._slam_simulator.occupancy_grid
             if occ.shape != base_img.shape:
                 from scipy.ndimage import zoom
                 occ = zoom(occ, (self.map_size_pixels / occ.shape[0], self.map_size_pixels / occ.shape[1]), order=0)
-            base_img[occ == 1] = 0.5  # 障碍灰色，永久
-        # 激光照射到的非障碍区域置为白色
+            base_img[occ == 1] = 0.5
         mask_explored = self._slam_scanned_mask & (base_img != 0.5)
         base_img[mask_explored] = 1.0
         self.ax_right.imshow(base_img, cmap='gray', origin='lower', vmin=0, vmax=1,
                              extent=[0, self.map_size_meters, 0, self.map_size_meters])
-        # 轨迹
         if self._slam_simulator is not None:
             traj = np.array(self._slam_simulator.get_trajectory())
             if len(traj) > 1:
                 self.ax_right.plot(traj[:,0], traj[:,1], 'b-', linewidth=2)
             if self._slam_pose is not None:
-                # 右侧光标：填充色黑色，边缘黑色，调整尺寸和样式更醒目
                 self.ax_right.scatter([self._slam_pose[0]], [self._slam_pose[1]], 
                      s=250, c='magenta', edgecolors='black', linewidths=2, zorder=10)
-                # 激光束
                 scan = self._slam_simulator.simulate_laser_scan(self._slam_pose)
                 n_angles = self._slam_simulator.laser.scan_size
                 angles = np.linspace(0, 2*np.pi, n_angles, endpoint=False)
@@ -148,7 +170,14 @@ class MazeVisualizer:
         self.ax_right.set_title('SLAM Laser Exploration (No Obstacles)')
         self.ax_right.grid(False)
         plt.draw()
-        plt.pause(0.05)  # 使用配置的刷新速率
+        plt.pause(self.refresh_rate)
+
+    def show(self):
+        self.show_left()
+
+    # 兼容主探索阶段调用
+    def show_full_slam(self):
+        self.show_both()
 
     def show_lidar_scan(self, grid, x, y, n_beams=36, max_range=10):
         # 在左图上画出以(x, y)为中心的雷达扫描线

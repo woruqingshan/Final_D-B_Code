@@ -39,10 +39,10 @@ class AStarPlanner:
         return None
 
     def verify_node(self, node):
-        y, x = int(round(node[0])), int(round(node[1]))
+        x, y = int(round(node[0])), int(round(node[1]))  # 修正：node[0]是x，node[1]是y
         if y < 0 or y >= self.grid.shape[0] or x < 0 or x >= self.grid.shape[1]:
             return False
-        if self.grid[y, x] == 1:
+        if self.grid[y, x] == 1:  # grid[y, x]是正确的，y是行，x是列
             return False
         return True
 
