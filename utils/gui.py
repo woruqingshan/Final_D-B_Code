@@ -82,14 +82,17 @@ class MazeVisualizer:
 
     def _mark_laser_path(self, x0, y0, x1, y1):
         # 将激光束路径上的像素点在scanned_mask中置True
-        num = int(max(abs(x1-x0), abs(y1-y0)) * self.map_size_pixels / self.map_size_meters * 2)
+        num = int(max(abs(x1-x0), abs(y1-y0)) * (self.map_size_pixels-1) / (self.map_size_meters-1) * 2)
         if num < 2:
             num = 2
         xs = np.linspace(x0, x1, num)
         ys = np.linspace(y0, y1, num)
         for idx, (x, y) in enumerate(zip(xs, ys)):
-            ix = int(x / self.map_size_meters * self.map_size_pixels)
-            iy = int(y / self.map_size_meters * self.map_size_pixels)
+            # 修正：最大坐标映射到最后一格
+            ix = int(round(x / (self.map_size_meters-1) * (self.map_size_pixels-1)))
+            iy = int(round(y / (self.map_size_meters-1) * (self.map_size_pixels-1)))
+            ix = min(max(ix, 0), self.map_size_pixels - 1)
+            iy = min(max(iy, 0), self.map_size_pixels - 1)
             if 0 <= ix < self.map_size_pixels and 0 <= iy < self.map_size_pixels:
                 self._slam_scanned_mask[iy, ix] = True
                 # 新增：终点判断障碍/可行区域
@@ -97,8 +100,8 @@ class MazeVisualizer:
                     if self._slam_simulator and self._slam_simulator.occupancy_grid is not None:
                         grid = self._slam_simulator.occupancy_grid
                         grid_h, grid_w = grid.shape
-                        gx = int(ix * grid_w / self.map_size_pixels)
-                        gy = int(iy * grid_h / self.map_size_pixels)
+                        gx = min(max(int(round(ix / (self.map_size_pixels-1) * (grid_w-1))), 0), grid_w - 1)
+                        gy = min(max(int(round(iy / (self.map_size_pixels-1) * (grid_h-1))), 0), grid_h - 1)
                         if 0 <= gx < grid_w and 0 <= gy < grid_h:
                             if grid[gy, gx] == 1:
                                 self._slam_obstacle_mask[iy, ix] = True
@@ -118,14 +121,10 @@ class MazeVisualizer:
             self.ax_left.plot(self._start_point[0], self._start_point[1], 'o', color='green', markersize=12, label='Start')
         if self._end_point is not None:
             self.ax_left.plot(self._end_point[0], self._end_point[1], 'o', color='red', markersize=12, label='End')
+        # 新增：同步显示当前移动点（不显示轨迹和观测点）
         if hasattr(self, 'trajectory') and self.trajectory and len(self.trajectory) > 0:
-            xs, ys = zip(*self.trajectory)
-            self.ax_left.plot(xs, ys, color='orange', linewidth=2, alpha=0.7, label='Trajectory')
-            self.ax_left.scatter([xs[-1]], [ys[-1]], 
-                        s=300, c='magenta', edgecolors='black', linewidths=2, zorder=10, label='Flood Cursor')
-        if hasattr(self, 'scan_points') and self.scan_points and len(self.scan_points) > 0:
-            xs, ys = zip(*self.scan_points)
-            self.ax_left.scatter(xs, ys, color='cyan', s=30, label='Scan Points', alpha=0.7)
+            x, y = self.trajectory[-1]
+            self.ax_left.plot(x, y, 'o', color='magenta', markersize=18, markeredgecolor='black', label='Current')
         if hasattr(self, 'path') and self.path and len(self.path) > 0:
             xs, ys = zip(*self.path)
             self.ax_left.plot(xs, ys, color='blue', linewidth=2, label='A* Path')
@@ -134,7 +133,6 @@ class MazeVisualizer:
             self.ax_left.plot(xs, ys, color='red', linewidth=2, label='Return Trajectory')
             self.ax_left.scatter([xs[-1]], [ys[-1]], 
                     s=300, c='magenta', edgecolors='black', linewidths=2, zorder=10, label='Left Cursor')
-        
         # 新增：绘制检测到的终点（五角星）
         if self._detected_ends:
             end_x = [end[0] for end in self._detected_ends]
