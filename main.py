@@ -23,9 +23,9 @@ class Config:
         self.exploration_threshold = 1.0
         self.goal_distance_threshold = 2.0
         
-        # 新增：动画速度控制
-        self.gui_refresh_rate = 0.001  # GUI刷新间隔（秒）
-        self.animation_speed = 0.05    # A*回程动画速度（秒）
+        # 新增：动画速度控制（已调快小车速度，降低帧率）
+        self.gui_refresh_rate = 0.005  # 降低帧率（每秒约50帧）
+        self.animation_speed = 0.001     # 极快动画
 
 class Maze:
     def __init__(self, segments, start_point, config):
@@ -400,7 +400,7 @@ def load_line_segments_from_json(json_file_path):
 
 def main():
     # 加载迷宫
-    segments, start_point = load_line_segments_from_json('data/2.json')
+    segments, start_point = load_line_segments_from_json('data/3.json')
     if not segments:
         print("未加载到迷宫线段数据，程序退出")
         return
@@ -461,6 +461,7 @@ def main():
         pose = [pt[0] * slam.MAP_SIZE_METERS / maze.grid.shape[1], pt[1] * slam.MAP_SIZE_METERS / maze.grid.shape[0], 0]
         vis.update_slam_pose(pose)
         vis.show_full_slam()
+        # 强制加速：去除所有延时
 
     print(f'采集到的出口点: {maze_exits}')
     print(f'检测到的终点: {detected_ends}')
@@ -485,28 +486,29 @@ def main():
     
     print('End point:', end_point)
 
-    # 到达终点后，A*规划最优路径（终点->起点）
+    # 修复：planner 未定义，需先实例化
     planner = AStarPlanner(maze.grid, step=0.5)
     a_star_path = planner.planning(tuple(map(float, end_point)), tuple(map(float, start_point)))
     if a_star_path:
+        print("A* path:", a_star_path)
         pixel_path = [(int(round(x)), int(round(y))) for (x, y) in a_star_path]
-        # 1. 只显示静态蓝色最优路径
-        vis.set_trajectory([])
-        vis.set_scan_points([])
+        print("Pixel path:", pixel_path)
+        # 1. 显示静态蓝色最优路径
         vis.set_path(pixel_path)
-        vis._end_point = end_point
+        vis.set_return_trajectory([])  # 清空回程轨迹
+        vis.set_trajectory(traj)  # 保持探索轨迹
+        vis.set_scan_points(scan_pts)
         vis.show_left()
-        time.sleep(0.5)
-        # 2. 红色回程轨迹动画（终点->起点）
+        # 2. 红色回程轨迹动画（点沿A*路径移动到起点）
         return_traj = []
-        for p in pixel_path:
-            return_traj.append(p)
-            vis.set_trajectory([])
-            vis.set_scan_points([])
-            vis.set_path(pixel_path)
+        for idx, pt in enumerate(pixel_path):
+            return_traj.append(pt)
             vis.set_return_trajectory(return_traj)
+            vis.set_path(pixel_path)
+            vis.set_trajectory(traj)
+            vis.set_scan_points(scan_pts)
             vis.show_left()
-            time.sleep(config.animation_speed)
+        print("A*回程动画完成")
     else:
         print('No path found!')
 

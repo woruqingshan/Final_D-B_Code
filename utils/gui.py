@@ -129,7 +129,7 @@ class MazeVisualizer:
         self.ax_left.legend(loc='upper right')
         self.ax_left.grid(True)
         plt.draw()
-        plt.pause(self.refresh_rate)
+        plt.pause(0.0001)  # 强制极快刷新
 
     def show_both(self):
         """刷新左侧地图和右侧SLAM画面"""
@@ -170,7 +170,7 @@ class MazeVisualizer:
         self.ax_right.set_title('SLAM Laser Exploration (No Obstacles)')
         self.ax_right.grid(False)
         plt.draw()
-        plt.pause(self.refresh_rate)
+        plt.pause(0.0001)  # 强制极快刷新
 
     def show(self):
         self.show_left()
@@ -198,3 +198,38 @@ class MazeVisualizer:
 
     def save_current_fig_as_png(self, filename):
         plt.savefig(filename, dpi=150, bbox_inches='tight') 
+
+def refresh_left_maze_with_path_and_point(ax, segments, start_point, end_point, path, current_idx):
+    
+    ax.clear()
+    # 1. 迷宫线段
+    for seg in segments:
+        x0, y0 = seg['start']
+        x1, y1 = seg['end']
+        ax.plot([x0, x1], [y0, y1], color='black', linewidth=4)
+    # 2. 起点
+    if start_point is not None:
+        ax.plot(start_point[0], start_point[1], 'o', color='blue', markersize=12, label='Start')
+    # 3. 终点
+    if end_point is not None:
+        ax.plot(end_point[0], end_point[1], 'o', color='red', markersize=12, label='End')
+    # 4. A*最优路径
+    if path and len(path) > 1:
+        xs, ys = zip(*path)
+        ax.plot(xs, ys, color='blue', linewidth=2, label='A* Path')
+    # 5. 已走过的红色轨迹
+    if path and current_idx > 0:
+        xs, ys = zip(*path[:current_idx+1])
+        ax.plot(xs, ys, color='red', linewidth=2, label='Return Trajectory')
+    # 6. 当前点
+    if path and 0 <= current_idx < len(path):
+        x, y = path[current_idx]
+        ax.plot(x, y, 'o', color='red', markersize=16, markeredgecolor='black', label='Current')
+    ax.set_title("Maze & Path")
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_aspect('equal')
+    ax.legend(loc='upper right')
+    ax.grid(True)
+    plt.draw()
+    plt.pause(0.01)
