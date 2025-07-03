@@ -2,14 +2,42 @@ import matplotlib.pyplot as plt
 import numpy as np
 import json
 import math
+import tkinter as tk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib
+from typing import Optional
+matplotlib.use('TkAgg', force=True)  # 强制使用TkAgg后端
+matplotlib.interactive(False)  # 禁用交互模式
+plt.ioff()  # 关闭matplotlib的交互模式
+
+# 蓝色主题
+PRIMARY_COLOR = '#0D47A1'  # 深蓝色
+HOVER_COLOR = '#1565C0'    # 悬停深蓝
+BG_COLOR = '#eaf1fb'       # 主窗口淡蓝
+STATUS_BG = '#1976D2'      # 状态栏深蓝
+STATUS_FG = 'white'        # 状态栏白字
+BTN_FONT = ('Bradley Hand', 16, 'bold')
+LABEL_FONT = ('Bradley Hand', 12)
+TITLE_FONT = {'fontsize': 20, 'fontweight': 'bold', 'fontname': 'Bradley Hand', 'color': PRIMARY_COLOR}
+LEGEND_FONT = {'fontsize': 12, 'fontname': 'Bradley Hand'}
 
 class MazeVisualizer:
+    canvas: Optional[FigureCanvasTkAgg] = None  # 类型注解，兼容None和FigureCanvasTkAgg
     def __init__(self, map_size_pixels=21, map_size_meters=21.0, title="Maze Visualizer", refresh_rate=0.001):
+        # 确保matplotlib不会弹出新窗口
+        plt.ioff()
+        matplotlib.interactive(False) 
+
         self.map_size_pixels = map_size_pixels
         self.map_size_meters = float(map_size_meters)
         self.refresh_rate = refresh_rate  # 新增：刷新速率配置
         self.fig, (self.ax_left, self.ax_right) = plt.subplots(1, 2, figsize=(14, 7))
-        self.fig.suptitle(title, fontsize=16)
+        # 确保matplotlib不会创建独立窗口
+        plt.ioff()
+        matplotlib.interactive(False)
+        self.fig.subplots_adjust(left=0.05, right=0.95, top=0.92, bottom=0.08, wspace=0.18)
+        self.fig.set_facecolor(BG_COLOR)
+        self.fig.suptitle(title, **TITLE_FONT)
         self._maze_segments = []
         self._start_point = None
         self._end_point = None
@@ -33,6 +61,10 @@ class MazeVisualizer:
         self._scanned_obstacle_segments = set()
         # 新增：初始化理论障碍掩码
         self._theoretical_obstacle_mask = np.zeros((self.map_size_pixels, self.map_size_pixels), dtype=bool)
+        # 右上角蓝色横线装饰
+        self.fig.subplots_adjust(top=0.88)
+        self.fig.text(0.5, 0.96, '', ha='center', va='center', color=PRIMARY_COLOR, fontsize=1, bbox=dict(facecolor=PRIMARY_COLOR, edgecolor='none', boxstyle='square,pad=0.1'))
+        self.canvas = None  # 用于TkAgg画布
 
     def load_line_segments(self, segments, start_point=None, end_point=None):
         self._maze_segments = segments
@@ -102,6 +134,8 @@ class MazeVisualizer:
                 y_end = y0 + r_m * np.sin(a + theta)
                 self._mark_laser_path(x0, y0, x_end, y_end)
 
+
+    
     # 新增：设置检测到的终点
     def set_detected_ends(self, detected_ends):
         """设置检测到的终点集合，用于可视化"""
@@ -192,8 +226,7 @@ class MazeVisualizer:
         if hasattr(self, 'return_trajectory') and self.return_trajectory and len(self.return_trajectory) > 1:
             xs, ys = zip(*self.return_trajectory)
             self.ax_left.plot(xs, ys, color='red', linewidth=2, label='Return Trajectory')
-            self.ax_left.scatter([xs[-1]], [ys[-1]], 
-                    s=300, c='magenta', edgecolors='black', linewidths=2, zorder=10, label='Left Cursor')
+            
 
         if hasattr(self, '_multi_paths') :
             paths, colors = self._multi_paths
@@ -247,8 +280,12 @@ class MazeVisualizer:
         self.ax_right.set_aspect('equal')
         self.ax_right.set_title('SLAM Laser Exploration (No Obstacles)')
         self.ax_right.grid(False)
-        plt.draw()
-        plt.pause(self.refresh_rate)
+        if self.canvas is not None:
+            self.canvas.draw()
+            try:
+                self.canvas.get_tk_widget().update()
+            except Exception:
+                pass
 
     def show(self):
         self.show_left()
@@ -269,7 +306,7 @@ class MazeVisualizer:
                 else:
                     break
         plt.draw()
-        plt.pause(0.05)  # 使用配置的刷新速率
+        plt.pause(self.refresh_rate)  # 使用配置的刷新速率
 
     def save_current_fig_as_png(self, filename):
         plt.savefig(filename, dpi=150, bbox_inches='tight') 
@@ -312,6 +349,31 @@ class MazeVisualizer:
                     hit_seg_idx = idx
         return hit_point, hit_seg_idx
 
+    def mark_explored_by_laser(self, pose):
+        # 累积激光束路径到_explored_mask
+        if not hasattr(self, '_slam_explored_mask'):
+            self._slam_explored_mask = np.zeros((self.map_size_pixels, self.map_size_pixels), dtype=bool)
+        if self._slam_simulator is None:
+            return
+        scan = self._slam_simulator.simulate_laser_scan(pose)
+        n_angles = self._slam_simulator.laser.scan_size
+        angles = np.linspace(0, 2*np.pi, n_angles, endpoint=False)
+        x0, y0, theta = pose
+        for r, a in zip(scan, angles):
+            r_m = r / 1000.0
+            x_end = x0 + r_m * np.cos(a + theta)
+            y_end = y0 + r_m * np.sin(a + theta)
+            num = int(max(abs(x_end-x0), abs(y_end-y0)) * self.map_size_pixels / self.map_size_meters * 2)
+            if num < 2:
+                num = 2
+            xs = np.linspace(x0, x_end, num)
+            ys = np.linspace(y0, y_end, num)
+            for x, y in zip(xs, ys):
+                ix = int(x / self.map_size_meters * self.map_size_pixels)
+                iy = int(y / self.map_size_meters * self.map_size_pixels)
+                if 0 <= ix < self.map_size_pixels and 0 <= iy < self.map_size_pixels:
+                    self._slam_explored_mask[iy, ix] = True
+
 
 # 辅助函数：点到线段距离
 def point_to_segment_dist(p, a, b):
@@ -326,6 +388,194 @@ def point_to_segment_dist(p, a, b):
     proj_x = ax + t * dx
     proj_y = ay + t * dy
     return math.hypot(px - proj_x, py - proj_y)
+
+class RoundedButton:
+    def __init__(self, parent, text, command, bg_color=PRIMARY_COLOR, hover_color=HOVER_COLOR, 
+                 width=120, height=40, corner_radius=10):
+        self.parent = parent
+        self.text = text
+        self.command = command
+        self.bg_color = bg_color
+        self.hover_color = hover_color
+        self.width = width
+        self.height = height
+        self.corner_radius = corner_radius
+        self.is_hovered = False
+        
+        # 创建Canvas
+        self.canvas = tk.Canvas(parent, width=width, height=height, 
+                               bg=BG_COLOR, highlightthickness=0, relief=tk.FLAT)
+        
+        # 绘制圆角矩形
+        self.draw_button()
+        
+        # 绑定事件
+        self.canvas.bind('<Enter>', self.on_enter)
+        self.canvas.bind('<Leave>', self.on_leave)
+        self.canvas.bind('<Button-1>', self.on_click)
+        self.canvas.bind('<ButtonRelease-1>', self.on_release)
+        
+    def draw_button(self):
+        self.canvas.delete("all")
+        color = self.hover_color if self.is_hovered else self.bg_color
+        
+        # 绘制圆角矩形
+        x1, y1 = self.corner_radius, self.corner_radius
+        x2, y2 = self.width - self.corner_radius, self.height - self.corner_radius
+        
+        # 主体矩形
+        self.canvas.create_rectangle(x1, 0, x2, self.height, fill=color, outline=color)
+        self.canvas.create_rectangle(0, y1, self.width, y2, fill=color, outline=color)
+        
+        # 四个圆角
+        self.canvas.create_arc(0, 0, 2*self.corner_radius, 2*self.corner_radius, 
+                              start=90, extent=90, fill=color, outline=color)
+        self.canvas.create_arc(self.width-2*self.corner_radius, 0, self.width, 2*self.corner_radius, 
+                              start=0, extent=90, fill=color, outline=color)
+        self.canvas.create_arc(0, self.height-2*self.corner_radius, 2*self.corner_radius, self.height, 
+                              start=180, extent=90, fill=color, outline=color)
+        self.canvas.create_arc(self.width-2*self.corner_radius, self.height-2*self.corner_radius, 
+                              self.width, self.height, start=270, extent=90, fill=color, outline=color)
+        
+        # 添加文本
+        self.canvas.create_text(self.width//2, self.height//2, text=self.text, 
+                               fill='white', font=BTN_FONT)
+    
+    def on_enter(self, event):
+        self.is_hovered = True
+        self.draw_button()
+        
+    def on_leave(self, event):
+        self.is_hovered = False
+        self.draw_button()
+        
+    def on_click(self, event):
+        self.command()
+        
+    def on_release(self, event):
+        pass
+        
+    def pack(self, **kwargs):
+        self.canvas.pack(**kwargs)
+        
+    def grid(self, **kwargs):
+        self.canvas.grid(**kwargs)
+
+class MazeApp(tk.Tk):
+    def __init__(self, visualizer: MazeVisualizer, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.title("智能迷宫探索与SLAM建图系统")
+        self.geometry("1200x800")
+        self.configure(bg=BG_COLOR)
+        self.visualizer = visualizer
+        # 渐变背景Canvas
+        self.bg_canvas = tk.Canvas(self, width=1200, height=800, highlightthickness=0, bd=0)
+        self.bg_canvas.place(x=0, y=0, relwidth=1, relheight=1)
+        self._draw_gradient(self.bg_canvas, 1200, 800, color1="#eaf1fb", color2="#1565C0")
+        self.bind("<Configure>", self._on_resize_bg)
+        # 顶部按钮区，使用Frame，背景色与渐变顶部色一致
+        self.btn_frame = tk.Frame(self, highlightthickness=0, relief=tk.FLAT, bg='#eaf1fb')
+        self.btn_frame.pack(side=tk.TOP, fill=tk.X, pady=24)
+        self.btns = []
+        self.btn_explore = self._create_rounded_button(self.btn_frame, "开始探索", self.on_explore)
+        self.btn_return = self._create_rounded_button(self.btn_frame, "回到起点(A*)", self.on_return)
+        self.btn_slam = self._create_rounded_button(self.btn_frame, "SLAM建图", self.on_slam)
+        self.btn_save = self._create_rounded_button(self.btn_frame, "保存视图", self.on_save)
+        self.btn_reset = self._create_rounded_button(self.btn_frame, "重置", self.on_reset)
+        self.btn_exit = self._create_rounded_button(self.btn_frame, "退出", self.quit)
+        btns = [self.btn_explore, self.btn_return, self.btn_slam, self.btn_save, self.btn_reset, self.btn_exit]
+        for i, btn in enumerate(btns):
+            btn.grid(row=0, column=i, padx=18, pady=6, sticky='nsew')
+        self.btn_frame.grid_columnconfigure(tuple(range(len(btns))), weight=1)
+        # matplotlib画布自适应Tk窗口
+        plt.ioff()
+        matplotlib.interactive(False)
+        self.canvas = FigureCanvasTkAgg(self.visualizer.fig, master=self)
+        self.visualizer.canvas = self.canvas  # 关键：让visualizer能访问canvas
+        canvas_widget = self.canvas.get_tk_widget()
+        canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=1, padx=16, pady=10)
+        # 状态栏
+        self.status_var = tk.StringVar()
+        self.status_var.set("欢迎使用智能迷宫探索系统！")
+        self.status_bar = tk.Label(self, textvariable=self.status_var, bd=0, anchor=tk.W,
+                                   bg=STATUS_BG, fg=STATUS_FG, font=LABEL_FONT, height=2)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 2))
+        # 逻辑回调占位
+        self.explore_callback = None
+        self.return_callback = None
+        self.slam_callback = None
+        self.save_callback = None
+        self.reset_callback = None
+        plt.ioff()
+
+    def _draw_gradient(self, canvas, width, height, color1, color2):
+        # 竖直渐变色
+        r1, g1, b1 = self.winfo_rgb(color1)
+        r2, g2, b2 = self.winfo_rgb(color2)
+        r_ratio = (r2 - r1) / height
+        g_ratio = (g2 - g1) / height
+        b_ratio = (b2 - b1) / height
+        for i in range(height):
+            nr = int(r1 + (r_ratio * i)) // 256
+            ng = int(g1 + (g_ratio * i)) // 256
+            nb = int(b1 + (b_ratio * i)) // 256
+            color = f'#{nr:02x}{ng:02x}{nb:02x}'
+            canvas.create_line(0, i, width, i, fill=color)
+
+    def _on_resize_bg(self, event):
+        # 窗口大小变化时重绘渐变背景
+        self.bg_canvas.delete("all")
+        w = self.winfo_width()
+        h = self.winfo_height()
+        self.bg_canvas.config(width=w, height=h)
+        self._draw_gradient(self.bg_canvas, w, h, color1="#eaf1fb", color2="#1565C0")
+
+    def _create_rounded_button(self, parent, text, command):
+        btn = RoundedButton(parent, text, command, 
+                           bg_color=PRIMARY_COLOR, hover_color=HOVER_COLOR,
+                           width=140, height=45, corner_radius=12)
+        self.btns.append(btn)
+        return btn
+
+    def set_callbacks(self, explore_cb, return_cb, slam_cb, save_cb=None, reset_cb=None):
+        self.explore_callback = explore_cb
+        self.return_callback = return_cb
+        self.slam_callback = slam_cb
+        self.save_callback = save_cb
+        self.reset_callback = reset_cb
+
+    def on_explore(self):
+        if self.explore_callback:
+            self.status_var.set("正在探索迷宫...")
+            self.explore_callback()
+            self.status_var.set("探索完成！")
+
+    def on_return(self):
+        if self.return_callback:
+            self.status_var.set("正在A*回到起点...")
+            self.return_callback()
+            self.status_var.set("回到起点完成！")
+
+    def on_slam(self):
+        if self.slam_callback:
+            self.status_var.set("正在进行SLAM建图...")
+            self.slam_callback()
+            self.status_var.set("SLAM建图完成！")
+
+    def on_save(self):
+        if self.save_callback:
+            self.save_callback()
+            self.status_var.set("视图已保存！")
+        else:
+            self.visualizer.save_current_fig_as_png("maze_gui_snapshot.png")
+            self.status_var.set("视图已保存为maze_gui_snapshot.png！")
+
+    def on_reset(self):
+        if self.reset_callback:
+            self.reset_callback()
+            self.status_var.set("已重置！")
+        else:
+            self.status_var.set("重置功能未实现！") 
 
 def refresh_left_maze_with_path_and_point(ax, segments, start_point, end_point, path, current_idx):
     

@@ -3,7 +3,7 @@ import numpy as np
 import os
 from collections import deque
 from planning.a_star import AStarPlanner
-from utils.gui import MazeVisualizer
+from utils.gui import MazeVisualizer, MazeApp
 from simulation.slam_simulator import SLAMSimulator
 import matplotlib
 matplotlib.use('TkAgg')
@@ -15,6 +15,7 @@ import math
 import sys
 import os
 from queue import PriorityQueue
+import tkinter as tk
 
 # ========== Config, Maze, FloodFillExplorer ========== #
 class Config:
@@ -421,61 +422,164 @@ def load_line_segments_from_json(json_file_path):
             print(f"❌ Failed to load JSON: {e}")
             return [], [0, 0] 
 
-def main():
-    # 加载迷宫
-    segments, start_point = load_line_segments_from_json('data/4.json')
-    if not segments:
-        print("未加载到迷宫线段数据，程序退出")
-        return
-    print('Maze loaded. Start:', start_point)
-    
-    # 构建迷宫对象
-    config = Config()
-    
-    # 快速模式：大幅提升动画速度
-    #fast_mode = True  # 设置为True启用快速模式
-    #if fast_mode:
-    #    config.gui_refresh_rate = 0.0001  # 极快刷新
-    #    config.animation_speed = 0.01     # 极快动画
-    #    print("🚀 快速模式已启用")
-    
-    maze = Maze(segments, start_point, config)
-    explorer = FloodFillExplorer(maze, config)
-    # 洪水填充探索，收集完整轨迹
-    path, exits = explorer.explore(start_point)
-    print(f"\n探索完成！")
-    print(f"出口位置: {exits}")
-    print(f"最终探索率: {maze.get_exploration_rate()*100:.1f}%")
+# ========== 主流程函数化 ========== #
+class MazeGUIController:
+    def __init__(self):
+        # 加载迷宫
+        segments, start_point = load_line_segments_from_json('data/4.json')
+        if not segments:
+            print("未加载到迷宫线段数据，程序退出")
+            sys.exit(1)
+        self.segments = segments
+        self.start_point = start_point
+        self.config = Config()
+        self.maze = Maze(segments, start_point, self.config)
+        self.explorer = FloodFillExplorer(self.maze, self.config)
+        self.traj = []
+        self.scan_pts = []
+        self.scan_imgs = []
+        self.maze_exits = set()
+        self.detected_ends = set()
+        self.path = []
+        self.end_point = None
+        self.fused_img = None
+        self.slam = None
+        self.vis = MazeVisualizer(map_size_pixels=int(self.maze.grid.shape[1]), map_size_meters=float(self.maze.grid.shape[0]), refresh_rate=self.config.gui_refresh_rate)
+        self.vis.load_line_segments(self.segments, start_point=self.start_point)
+        self.vis.set_detected_ends(set())
+        self.vis.set_trajectory([])
+        self.vis.set_scan_points([])
+        self.vis.set_path([])
+        self.vis.set_return_trajectory([])
+        self.vis.set_multi_paths([], [])
+        self.vis.show_left()
+        self.map_size_pixels = int(self.maze.grid.shape[1])
+        self.map_size_meters = float(self.maze.grid.shape[0])
+        self.upscale = 40
+        self.PGM_SAVE_PATH = 'pgm_outputs'
+        os.makedirs(self.PGM_SAVE_PATH, exist_ok=True)
+        self._explore_gen = None
+        self._explore_running = False
 
-    # 获取检测到的终点
-    detected_ends = explorer.get_detected_ends()
-    print(f"检测到的终点: {detected_ends}")
+    def explore_maze(self):
+        if self._explore_running:
+            return  # 防止重复点击
+        self._explore_running = True
+        self.traj = []
+        self.scan_pts = []
+        self.scan_imgs = []
+        self.maze_exits = set()
+        self.detected_ends = set()
+        self.vis.set_detected_ends(set())
+        self.vis.set_trajectory([])
+        self.vis.set_scan_points([])
+        self.vis.set_path([])
+        self.vis.set_return_trajectory([])
+        self.vis.set_multi_paths([], [])
+        self.vis.show_left()
+        self._explore_gen = self._explore_generator()
+        self._step_explore()
 
-    # 可视化与采集同步
-    vis = MazeVisualizer(map_size_pixels=int(maze.grid.shape[1]), map_size_meters=float(maze.grid.shape[0]), 
-                        refresh_rate=config.gui_refresh_rate)
-    vis.load_line_segments(segments, start_point=start_point)
-    # 新增：设置检测到的终点到GUI
-    vis.set_detected_ends(detected_ends)
-    traj = []
-    scan_pts = []
-    scan_imgs = []
-    maze_exits = set()
+    def _step_explore(self):
+        try:
+            # 类型检查，确保self._explore_gen为生成器
+            if self._explore_gen is not None and hasattr(self._explore_gen, '__next__'):
+                next(self._explore_gen)
+            else:
+                self._explore_running = False
+                return
+            self.vis.set_trajectory(self.traj)
+            self.vis.set_scan_points(self.scan_pts)
+            self.vis.show_left()
+            # 兼容TkAgg嵌入式刷新
+            canvas = getattr(self.vis, 'canvas', None)
+            if canvas is not None and hasattr(canvas, 'get_tk_widget'):
+                canvas.get_tk_widget().after(10, self._step_explore)
+            else:
+                import time; time.sleep(self.config.gui_refresh_rate)
+                self._step_explore()
+        except StopIteration:
+            self._explore_running = False
+            self.vis.set_trajectory(self.traj)
+            self.vis.set_scan_points(self.scan_pts)
+            self.vis.show_left()
+            self.detected_ends = self.explorer.get_detected_ends()
+            self.vis.set_detected_ends(self.detected_ends)
+            # 生成scan_imgs，保证slam_mapping可用
+            self.scan_imgs = []
+            for idx, pt in enumerate(self.scan_pts):
+                img = self.scan_to_pgm_highres(self.maze.grid, [pt], idx, upscale=self.upscale)
+                self.scan_imgs.append(img)
+            print("探索完成！")
 
-    # 初始化SLAM
-    slam = SLAMSimulator(map_size_pixels=maze.grid.shape[1], map_size_meters=maze.grid.shape[0])
-    slam.set_occupancy_grid((maze.grid==1).astype(np.uint8))
-    vis.set_slam_simulator(slam)
+    def _explore_generator(self):
+        # 洪水填充探索，逐步推进
+        self.path = []
+        self.traj = []
+        self.scan_pts = []
+        self.scan_imgs = []
+        self.maze_exits = set()
+        self.detected_ends = set()
+        explorer = self.explorer
+        maze = self.maze
+        config = self.config
+        start_pos = self.start_point
+        maze.mark_explored(int(start_pos[0]), int(start_pos[1]))
+        path_history = [start_pos]
+        exits = set()
+        current_pos = start_pos
+        start_pos_tuple = (maze.start_point[0], maze.start_point[1])
+        while maze.get_exploration_rate() < config.exploration_threshold:
+            goals = explorer.generate_exploration_goals(current_pos)
+            if not goals:
+                break
+            found_path = False
+            for goal in sorted(goals, key=lambda g: np.hypot(g[0] - current_pos[0], g[1] - current_pos[1])):
+                if goal == current_pos:
+                    continue
+                path = explorer._plan_path(current_pos, goal)
+                if path:
+                    found_path = True
+                    for pos in path[1:]:
+                        x, y = pos
+                        boundary_exits = explorer.check_boundary_exit(x, y)
+                        if boundary_exits:
+                            for exit_point in boundary_exits:
+                                if exit_point != start_pos_tuple and exit_point not in exits:
+                                    exits.add(exit_point)
+                                    self.detected_ends.add(exit_point)
+                        maze.mark_explored(int(x), int(y))
+                        current_pos = (x, y)
+                        path_history.append(current_pos)
+                        self.traj.append(current_pos)
+                        pt_int = (int(round(x)), int(round(y)))
+                        if pt_int not in self.scan_pts:
+                            self.scan_pts.append(pt_int)
+                        yield  # 每走一步yield一次
+                    break
+            if not found_path:
+                break
+        # 探索结束后，补齐到终点
+        if self.detected_ends:
+            nearest_end = min(self.detected_ends, key=lambda p: np.hypot(p[0] - current_pos[0], p[1] - current_pos[1]))
+            if current_pos != nearest_end:
+                path = explorer._plan_path(current_pos, nearest_end)
+                if path:
+                    for pos in path[1:]:
+                        x, y = pos
+                        maze.mark_explored(int(x), int(y))
+                        current_pos = (x, y)
+                        path_history.append(current_pos)
+                        self.traj.append(current_pos)
+                        pt_int = (int(round(x)), int(round(y)))
+                        if pt_int not in self.scan_pts:
+                            self.scan_pts.append(pt_int)
+                        yield
+        self.path = list(path_history)
+        self.detected_ends = set(exits) | self.detected_ends
+        # 结束
 
-    # 读取迷宫尺寸
-    maze_rows = maze.grid.shape[0]
-    maze_cols = maze.grid.shape[1]
-    map_size_meters = float(max(maze_rows, maze_cols) - 1)  # 注意-1
-    upscale = 40  # 每米40像素，可根据需要调整
-    map_size_pixels = int(map_size_meters * upscale)
-
-    # 生成高分辨率PGM扫描图
-    def scan_to_pgm_highres(grid, scan_points, idx, upscale=40):
+    def scan_to_pgm_highres(self, grid, scan_points, idx, upscale=40):
         h, w = grid.shape
         img = np.ones((h, w), dtype=np.uint8) * 255
         img[grid==1] = 0
@@ -484,134 +588,100 @@ def main():
             for sx, sy in scan:
                 img[sy, sx] = 128
         img_up = zoom(img, (upscale, upscale), order=0)
-        save_pgm(os.path.join(PGM_SAVE_PATH, f'scan_{idx}.pgm'), img_up)
+        save_pgm(os.path.join(self.PGM_SAVE_PATH, f'scan_{idx}.pgm'), img_up)
         return img_up
 
-    scan_imgs = []
-    scan_pts = []
-    for idx, pt in enumerate(path):
-        traj.append(pt)
-        pt_int = (int(round(pt[0])), int(round(pt[1])))
-        if pt_int not in scan_pts:
-            scan_pts.append(pt_int)
-            img = scan_to_pgm_highres(maze.grid, [pt_int], len(scan_imgs), upscale=upscale)
-            scan_imgs.append(img)
-            
-            # 判断是否为出口
-            x, y = pt_int
-            if (x == 0 or x == maze.grid.shape[1] - 1 or y == 0 or y == maze.grid.shape[0] - 1) and maze.grid[y, x] == 0:
-                maze_exits.add(pt_int)
-        # 强制加速：去除所有延时
+    def return_to_start(self):
+        # 选择终点
+        if self.detected_ends:
+            last_pt = self.traj[-1]
+            end_pt = min(self.detected_ends, key=lambda pt: math.hypot(pt[0]-last_pt[0], pt[1]-last_pt[1]))
+            self.end_point = end_pt
+        elif self.maze_exits:
+            last_pt = self.traj[-1]
+            end_pt = min(self.maze_exits, key=lambda pt: math.hypot(pt[0]-last_pt[0], pt[1]-last_pt[1]))
+            self.end_point = end_pt
+        else:
+            self.end_point = (int(round(self.traj[-1][0])), int(round(self.traj[-1][1])))
+        self.vis._end_point = self.end_point
+        # 多路径
+        all_paths = find_all_paths(self.maze.grid, tuple(map(int, self.end_point)), tuple(map(int, self.start_point)), max_paths=5, max_depth=200)
+        multi_colors = ['orange','purple','cyan','lime','brown']
+        self.vis.set_multi_paths(all_paths, multi_colors)
+        self.vis.show_left()
+        # A*最优路径
+        planner = AStarPlanner(self.maze.grid, step=0.5)
+        a_star_path = planner.planning(tuple(map(float, self.end_point)), tuple(map(float, self.start_point)))
+        if a_star_path:
+            pixel_path = [(int(round(x)), int(round(y))) for (x, y) in a_star_path]
+            self.vis.set_path(pixel_path)
+            self.vis.set_return_trajectory([])
+            self.vis.set_trajectory(self.traj)
+            self.vis.set_scan_points(self.scan_pts)
+            self.vis.show_left()
+            return_traj = []
+            for idx, pt in enumerate(pixel_path):
+                return_traj.append(pt)
+                self.vis.set_return_trajectory(return_traj)
+                self.vis.set_path(pixel_path)
+                self.vis.set_trajectory(self.traj)
+                self.vis.set_scan_points(self.scan_pts)
+                self.vis.show_left()
+        else:
+            print('No path found!')
 
-    print(f'采集到的出口点: {maze_exits}')
-    print(f'检测到的终点: {detected_ends}')
-    
-    # 优先使用检测到的终点，如果没有则使用采集到的出口点
-    if detected_ends:
-        # 选择距离最后位置最近的检测到的终点
-        last_pt = traj[-1]
-        end_pt = min(detected_ends, key=lambda pt: math.hypot(pt[0]-last_pt[0], pt[1]-last_pt[1]))
-        end_point = end_pt
-        print(f'使用检测到的终点: {end_point}')
-    elif maze_exits:
-        # 如果没有检测到的终点，使用采集到的出口点
-        last_pt = traj[-1]
-        end_pt = min(maze_exits, key=lambda pt: math.hypot(pt[0]-last_pt[0], pt[1]-last_pt[1]))
-        end_point = end_pt
-        print(f'使用采集到的出口点: {end_point}')
-    else:
-        # 如果都没有，使用路径的最后一个点
-        end_point = (int(round(traj[-1][0])), int(round(traj[-1][1])))
-        print(f'使用路径终点: {end_point}')
-    
-    print('End point:', end_point)
-    
-    # 合并所有扫描PGM为灰度图
-    fused_img = fuse_scans(scan_imgs)
-    fused_path = os.path.join(PGM_SAVE_PATH, 'fused_maze.pgm')
-    save_pgm(fused_path, fused_img)
-    fused_png_path = os.path.join(PGM_SAVE_PATH, 'fused_maze.png')
-    plt.imsave(fused_png_path, fused_img, cmap='gray', vmin=0, vmax=255)
-    print(f'Fused maze map saved: {fused_path} and {fused_png_path}')
+    def slam_mapping(self):
+        if hasattr(self, '_slam_running') and self._slam_running:
+            return
+        if not self.traj:
+            print('请先进行探索')
+            return
+        self._slam_running = True
+        self._slam_anim_idx = 0
+        self._slam_anim_traj = list(self.traj)
+        self._slam_anim_total = len(self._slam_anim_traj)
+        self._slam_anim_step()
 
-    # 初始化SLAM和可视化器，参数同步
-    slam = SLAMSimulator(map_size_pixels=map_size_pixels, map_size_meters=map_size_meters)
-    slam.set_occupancy_grid((fused_img<128).astype(np.uint8))
-    vis = MazeVisualizer(map_size_pixels=map_size_pixels, map_size_meters=map_size_meters, title="Maze SLAM Exploration", refresh_rate=config.gui_refresh_rate)
-    vis.load_line_segments(segments, start_point, None)
-    vis.set_slam_simulator(slam)
+    def _slam_anim_step(self):
+        if self._slam_anim_idx >= self._slam_anim_total:
+            self._slam_running = False
+            print("SLAM激光探索动画完成")
+            return
+        pt = self._slam_anim_traj[self._slam_anim_idx]
+        pose = [pt[0] * self.vis.map_size_meters / self.vis.map_size_pixels,
+                pt[1] * self.vis.map_size_meters / self.vis.map_size_pixels, 0]
+        self.vis.update_slam_pose(pose)
+        self.vis.mark_explored_by_laser(pose)
+        self.vis.show_all()
+        self._slam_anim_idx += 1
+        canvas = getattr(self.vis, 'canvas', None)
+        if canvas is not None and hasattr(canvas, 'get_tk_widget'):
+            canvas.get_tk_widget().after(30, self._slam_anim_step)
+        else:
+            import time; time.sleep(self.config.animation_speed)
+            self._slam_anim_step()
 
-    # SLAM式探索主循环
-    pose = [start_point[0] / (maze_cols - 1) * map_size_meters, start_point[1] / (maze_rows - 1) * map_size_meters, 0]
-    mapbytes = bytearray(map_size_pixels * map_size_pixels)
-    for idx, (x, y) in enumerate(path):
-        # 1. 计算新位姿（物理坐标，归一化到0~map_size_meters）
-        new_pose = [x / (maze_cols - 1) * map_size_meters, y / (maze_rows - 1) * map_size_meters, 0]
-        dx = new_pose[0] - pose[0]
-        dy = new_pose[1] - pose[1]
-        dtheta = new_pose[2] - pose[2]
-        pose_change = (dx, dy, dtheta)
-        pose = new_pose
-        # 2. 激光扫描
-        scan = slam.simulate_laser_scan(pose)
-        # 3. SLAM更新
-        slam.update(scan, pose_change)
-        # 4. 获取SLAM地图
-        slam.slam.getmap(mapbytes)
-        vis.set_slam_mapbytes(mapbytes)
-        # 5. 更新可视化器当前轨迹点
-        vis.trajectory = path[:idx+1]
-        vis.update_slam_pose(pose)
-        vis.show_all()
-        time.sleep(config.animation_speed)
+    def save_view(self):
+        self.vis.save_current_fig_as_png("maze_gui_snapshot.png")
+        print("视图已保存为maze_gui_snapshot.png！")
 
-    # 保存最终SLAM地图
-    slam_map = np.array(mapbytes, dtype=np.uint8).reshape(map_size_pixels, map_size_pixels)
-    slam_map_path = os.path.join(PGM_SAVE_PATH, 'slam_result.png')
-    plt.imsave(slam_map_path, slam_map, cmap='gray', vmin=0, vmax=255)
-    print(f'SLAM结果图已保存为{slam_map_path}')
+    def reset(self):
+        # 重新加载迷宫和状态
+        self.__init__()
+        print("已重置！")
 
-    print('全部流程结束，所有结果已保存到pgm_outputs。')
-
-   
-    # 保证起点和终点可通行
-    maze.grid[start_point[1], start_point[0]] = 0
-    maze.grid[end_point[1], end_point[0]] = 0
-
-    # 搜索多条路径并可视化（终点->起点）
-    multi_colors = ['orange','purple','cyan','lime','brown']
-    all_paths = find_all_paths(maze.grid, tuple(map(int, end_point)), tuple(map(int, start_point)), max_paths=5, max_depth=200)
-    vis.set_multi_paths(all_paths, multi_colors)
-    vis.show_left()
-
-    # 修复：planner 未定义，需先实例化
-    planner = AStarPlanner(maze.grid, step=0.5)
-    a_star_path = planner.planning(tuple(map(float, end_point)), tuple(map(float, start_point)))
-    if a_star_path:
-        print("A* path:", a_star_path)
-        pixel_path = [(int(round(x)), int(round(y))) for (x, y) in a_star_path]
-        print("Pixel path:", pixel_path)
-        # 1. 显示静态蓝色最优路径
-        vis.set_path(pixel_path)
-        vis.set_return_trajectory([])  # 清空回程轨迹
-        vis.set_trajectory(traj)  # 保持探索轨迹
-        vis.set_scan_points(scan_pts)
-        vis.show_left()
-        # 2. 红色回程轨迹动画（点沿A*路径移动到起点）
-        return_traj = []
-        for idx, pt in enumerate(pixel_path):
-            return_traj.append(pt)
-            vis.set_return_trajectory(return_traj)
-            vis.set_path(pixel_path)
-            vis.set_trajectory(traj)
-            vis.set_scan_points(scan_pts)
-            vis.show_left()
-        print("A*回程动画完成")
-    else:
-        print('No path found!')
-
-    
+# ========== 主程序入口 ========== #
+def main_gui():
+    controller = MazeGUIController()
+    app = MazeApp(controller.vis)
+    app.set_callbacks(
+        explore_cb=controller.explore_maze,
+        return_cb=controller.return_to_start,
+        slam_cb=controller.slam_mapping,
+        save_cb=controller.save_view,
+        reset_cb=controller.reset
+    )
+    app.mainloop()
 
 if __name__ == '__main__':
-    main()
-    plt.show(block=True)
+    main_gui()
