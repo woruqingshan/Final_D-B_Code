@@ -23,6 +23,9 @@ class MazeVisualizer:
         self._slam_pose = None
         # 新增：存储检测到的终点，用于可视化
         self._detected_ends = set()
+        # 新增：SLAM探索掩码（可行区域）和障碍掩码
+        self._slam_explored_mask = np.zeros((self.map_size_pixels, self.map_size_pixels), dtype=bool)
+        self._slam_obstacle_mask = np.zeros((self.map_size_pixels, self.map_size_pixels), dtype=bool)
 
     def load_line_segments(self, segments, start_point=None, end_point=None):
         self._maze_segments = segments
@@ -56,6 +59,8 @@ class MazeVisualizer:
         self._slam_simulator = slam_simulator
         # 重置掩码
         self._slam_scanned_mask = np.zeros((self.map_size_pixels, self.map_size_pixels), dtype=bool)
+        self._slam_explored_mask = np.zeros((self.map_size_pixels, self.map_size_pixels), dtype=bool)
+        self._slam_obstacle_mask = np.zeros((self.map_size_pixels, self.map_size_pixels), dtype=bool)
 
     def update_slam_pose(self, pose):
         self._slam_pose = pose
@@ -82,11 +87,25 @@ class MazeVisualizer:
             num = 2
         xs = np.linspace(x0, x1, num)
         ys = np.linspace(y0, y1, num)
-        for x, y in zip(xs, ys):
+        for idx, (x, y) in enumerate(zip(xs, ys)):
             ix = int(x / self.map_size_meters * self.map_size_pixels)
             iy = int(y / self.map_size_meters * self.map_size_pixels)
             if 0 <= ix < self.map_size_pixels and 0 <= iy < self.map_size_pixels:
                 self._slam_scanned_mask[iy, ix] = True
+                # 新增：终点判断障碍/可行区域
+                if idx == len(xs) - 1:
+                    if self._slam_simulator and self._slam_simulator.occupancy_grid is not None:
+                        grid = self._slam_simulator.occupancy_grid
+                        grid_h, grid_w = grid.shape
+                        gx = int(ix * grid_w / self.map_size_pixels)
+                        gy = int(iy * grid_h / self.map_size_pixels)
+                        if 0 <= gx < grid_w and 0 <= gy < grid_h:
+                            if grid[gy, gx] == 1:
+                                self._slam_obstacle_mask[iy, ix] = True
+                            else:
+                                self._slam_explored_mask[iy, ix] = True
+                else:
+                    self._slam_explored_mask[iy, ix] = True
 
     def show_left(self):
         """只刷新左侧地图和轨迹，不刷新右侧SLAM画面"""
@@ -136,16 +155,10 @@ class MazeVisualizer:
         self.show_left()
         # 右侧SLAM激光探索视图
         self.ax_right.clear()
-        self.ax_right.set_facecolor('0.5')
-        base_img = np.zeros((self.map_size_pixels, self.map_size_pixels), dtype=float)
-        if self._slam_simulator is not None and hasattr(self._slam_simulator, 'occupancy_grid') and self._slam_simulator.occupancy_grid is not None:
-            occ = self._slam_simulator.occupancy_grid
-            if occ.shape != base_img.shape:
-                from scipy.ndimage import zoom
-                occ = zoom(occ, (self.map_size_pixels / occ.shape[0], self.map_size_pixels / occ.shape[1]), order=0)
-            base_img[occ == 1] = 0.5
-        mask_explored = self._slam_scanned_mask & (base_img != 0.5)
-        base_img[mask_explored] = 1.0
+        # 新逻辑：全灰，障碍黑色，可行区域白色
+        base_img = np.full((self.map_size_pixels, self.map_size_pixels), 0.5)  # 全灰
+        base_img[self._slam_explored_mask] = 1.0  # 白色
+        base_img[self._slam_obstacle_mask] = 0.0  # 黑色
         self.ax_right.imshow(base_img, cmap='gray', origin='lower', vmin=0, vmax=1,
                              extent=[0, self.map_size_meters, 0, self.map_size_meters])
         if self._slam_simulator is not None:
@@ -170,7 +183,7 @@ class MazeVisualizer:
         self.ax_right.set_title('SLAM Laser Exploration (No Obstacles)')
         self.ax_right.grid(False)
         plt.draw()
-        plt.pause(0.0001)  # 强制极快刷新
+        plt.pause(self.refresh_rate)
 
     def show(self):
         self.show_left()
