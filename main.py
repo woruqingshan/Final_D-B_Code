@@ -294,10 +294,33 @@ class FloodFillExplorer:
         """启发式函数：欧几里得距离"""
         return np.hypot(a[0] - b[0], a[1] - b[1])
 
-
 # PGM保存工具
 PGM_SAVE_PATH = 'pgm_outputs'
 os.makedirs(PGM_SAVE_PATH, exist_ok=True)
+
+ # 只在到达终点后，才查找并展示多条路径
+def find_all_paths(grid, start, end, max_paths=5, max_depth=200):
+    """DFS搜索所有从start到end的路径，返回像素点路径列表"""
+    paths = []
+    path = []
+    rows, cols = grid.shape
+    directions = [(-1,0),(1,0),(0,-1),(0,1)]
+    def dfs(x, y, depth):
+        if len(paths) >= max_paths or depth > max_depth:
+            return
+        if (x, y) == end:
+            paths.append(list(path)+[(x, y)])
+            return
+        for dx, dy in directions:
+            nx, ny = x+dx, y+dy
+                # 只要不是障碍（1）都可以走
+            if 0<=nx<cols and 0<=ny<rows and grid[ny, nx]!=1 and (nx, ny) not in path:
+                path.append((x, y))
+                dfs(nx, ny, depth+1)
+                path.pop()
+    dfs(start[0], start[1], 0)
+    return paths
+
 
 def save_pgm(filename, img, maxval=255):
     h, w = img.shape
@@ -400,7 +423,7 @@ def load_line_segments_from_json(json_file_path):
 
 def main():
     # 加载迷宫
-    segments, start_point = load_line_segments_from_json('data/3.json')
+    segments, start_point = load_line_segments_from_json('data/4.json')
     if not segments:
         print("未加载到迷宫线段数据，程序退出")
         return
@@ -418,7 +441,7 @@ def main():
     
     maze = Maze(segments, start_point, config)
     explorer = FloodFillExplorer(maze, config)
-    # 洪水填充探索
+    # 洪水填充探索，收集完整轨迹
     path, exits = explorer.explore(start_point)
     print(f"\n探索完成！")
     print(f"出口位置: {exits}")
@@ -429,7 +452,7 @@ def main():
     print(f"检测到的终点: {detected_ends}")
 
     # 可视化与采集同步
-    vis = MazeVisualizer(map_size_pixels=maze.grid.shape[1], map_size_meters=maze.grid.shape[0], 
+    vis = MazeVisualizer(map_size_pixels=int(maze.grid.shape[1]), map_size_meters=float(maze.grid.shape[0]), 
                         refresh_rate=config.gui_refresh_rate)
     vis.load_line_segments(segments, start_point=start_point)
     # 新增：设置检测到的终点到GUI
@@ -444,23 +467,40 @@ def main():
     slam.set_occupancy_grid((maze.grid==1).astype(np.uint8))
     vis.set_slam_simulator(slam)
 
+    # 读取迷宫尺寸
+    maze_rows = maze.grid.shape[0]
+    maze_cols = maze.grid.shape[1]
+    map_size_meters = float(max(maze_rows, maze_cols) - 1)  # 注意-1
+    upscale = 40  # 每米40像素，可根据需要调整
+    map_size_pixels = int(map_size_meters * upscale)
+
+    # 生成高分辨率PGM扫描图
+    def scan_to_pgm_highres(grid, scan_points, idx, upscale=40):
+        h, w = grid.shape
+        img = np.ones((h, w), dtype=np.uint8) * 255
+        img[grid==1] = 0
+        for x, y in scan_points:
+            scan = simulate_lidar(grid, x, y)
+            for sx, sy in scan:
+                img[sy, sx] = 128
+        img_up = zoom(img, (upscale, upscale), order=0)
+        save_pgm(os.path.join(PGM_SAVE_PATH, f'scan_{idx}.pgm'), img_up)
+        return img_up
+
+    scan_imgs = []
+    scan_pts = []
     for idx, pt in enumerate(path):
         traj.append(pt)
         pt_int = (int(round(pt[0])), int(round(pt[1])))
         if pt_int not in scan_pts:
             scan_pts.append(pt_int)
-            img = scan_to_pgm(maze.grid, [pt_int], len(scan_imgs))
+            img = scan_to_pgm_highres(maze.grid, [pt_int], len(scan_imgs), upscale=upscale)
             scan_imgs.append(img)
+            
             # 判断是否为出口
             x, y = pt_int
             if (x == 0 or x == maze.grid.shape[1] - 1 or y == 0 or y == maze.grid.shape[0] - 1) and maze.grid[y, x] == 0:
                 maze_exits.add(pt_int)
-        vis.set_trajectory(traj)
-        vis.set_scan_points(scan_pts)
-        # 新增：SLAM右侧激光探索视图实时更新
-        pose = [pt[0] * slam.MAP_SIZE_METERS / maze.grid.shape[1], pt[1] * slam.MAP_SIZE_METERS / maze.grid.shape[0], 0]
-        vis.update_slam_pose(pose)
-        vis.show_full_slam()
         # 强制加速：去除所有延时
 
     print(f'采集到的出口点: {maze_exits}')
@@ -485,6 +525,64 @@ def main():
         print(f'使用路径终点: {end_point}')
     
     print('End point:', end_point)
+    
+    # 合并所有扫描PGM为灰度图
+    fused_img = fuse_scans(scan_imgs)
+    fused_path = os.path.join(PGM_SAVE_PATH, 'fused_maze.pgm')
+    save_pgm(fused_path, fused_img)
+    fused_png_path = os.path.join(PGM_SAVE_PATH, 'fused_maze.png')
+    plt.imsave(fused_png_path, fused_img, cmap='gray', vmin=0, vmax=255)
+    print(f'Fused maze map saved: {fused_path} and {fused_png_path}')
+
+    # 初始化SLAM和可视化器，参数同步
+    slam = SLAMSimulator(map_size_pixels=map_size_pixels, map_size_meters=map_size_meters)
+    slam.set_occupancy_grid((fused_img<128).astype(np.uint8))
+    vis = MazeVisualizer(map_size_pixels=map_size_pixels, map_size_meters=map_size_meters, title="Maze SLAM Exploration", refresh_rate=config.gui_refresh_rate)
+    vis.load_line_segments(segments, start_point, None)
+    vis.set_slam_simulator(slam)
+
+    # SLAM式探索主循环
+    pose = [start_point[0] / (maze_cols - 1) * map_size_meters, start_point[1] / (maze_rows - 1) * map_size_meters, 0]
+    mapbytes = bytearray(map_size_pixels * map_size_pixels)
+    for idx, (x, y) in enumerate(path):
+        # 1. 计算新位姿（物理坐标，归一化到0~map_size_meters）
+        new_pose = [x / (maze_cols - 1) * map_size_meters, y / (maze_rows - 1) * map_size_meters, 0]
+        dx = new_pose[0] - pose[0]
+        dy = new_pose[1] - pose[1]
+        dtheta = new_pose[2] - pose[2]
+        pose_change = (dx, dy, dtheta)
+        pose = new_pose
+        # 2. 激光扫描
+        scan = slam.simulate_laser_scan(pose)
+        # 3. SLAM更新
+        slam.update(scan, pose_change)
+        # 4. 获取SLAM地图
+        slam.slam.getmap(mapbytes)
+        vis.set_slam_mapbytes(mapbytes)
+        # 5. 更新可视化器当前轨迹点
+        vis.trajectory = path[:idx+1]
+        vis.update_slam_pose(pose)
+        vis.show_all()
+        time.sleep(config.animation_speed)
+
+    # 保存最终SLAM地图
+    slam_map = np.array(mapbytes, dtype=np.uint8).reshape(map_size_pixels, map_size_pixels)
+    slam_map_path = os.path.join(PGM_SAVE_PATH, 'slam_result.png')
+    plt.imsave(slam_map_path, slam_map, cmap='gray', vmin=0, vmax=255)
+    print(f'SLAM结果图已保存为{slam_map_path}')
+
+    print('全部流程结束，所有结果已保存到pgm_outputs。')
+
+   
+    # 保证起点和终点可通行
+    maze.grid[start_point[1], start_point[0]] = 0
+    maze.grid[end_point[1], end_point[0]] = 0
+
+    # 搜索多条路径并可视化（终点->起点）
+    multi_colors = ['orange','purple','cyan','lime','brown']
+    all_paths = find_all_paths(maze.grid, tuple(map(int, end_point)), tuple(map(int, start_point)), max_paths=5, max_depth=200)
+    vis.set_multi_paths(all_paths, multi_colors)
+    vis.show_left()
 
     # 修复：planner 未定义，需先实例化
     planner = AStarPlanner(maze.grid, step=0.5)
@@ -512,31 +610,7 @@ def main():
     else:
         print('No path found!')
 
-    # 合并所有扫描PGM为灰度图
-    fused_img = fuse_scans(scan_imgs)
-    fused_path = os.path.join(PGM_SAVE_PATH, 'fused_maze.pgm')
-    save_pgm(fused_path, fused_img)
-    fused_png_path = os.path.join(PGM_SAVE_PATH, 'fused_maze.png')
-    plt.imsave(fused_png_path, fused_img, cmap='gray', vmin=0, vmax=255)
-    print(f'Fused maze map saved: {fused_path} and {fused_png_path}')
-
-    # 初始化SLAM
-    slam = SLAMSimulator(map_size_pixels=fused_img.shape[1], map_size_meters=fused_img.shape[0])
-    slam.set_occupancy_grid((fused_img<128).astype(np.uint8))
-    # SLAM轨迹模拟
-    for idx, (x, y) in enumerate(scan_pts):
-        pose = [x * slam.MAP_SIZE_METERS / fused_img.shape[1], y * slam.MAP_SIZE_METERS / fused_img.shape[0], 0]
-        scan = slam.simulate_laser_scan(pose)
-        slam.update(scan, (0, 0, 0.1))
-        vis.update_slam_pose(pose)
-        vis.show_full_slam()
-    slam_map = np.array(slam.get_map(), dtype=np.uint8).reshape(slam.MAP_SIZE_PIXELS, slam.MAP_SIZE_PIXELS)
-    slam_map_path = os.path.join(PGM_SAVE_PATH, 'slam_result.png')
-    plt.imsave(slam_map_path, slam_map, cmap='gray', vmin=0, vmax=255)
-    print(f'SLAM结果图已保存为{slam_map_path}')
-
-
-    print('全部流程结束，所有结果已保存到pgm_outputs。')
+    
 
 if __name__ == '__main__':
     main()
